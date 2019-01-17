@@ -8,18 +8,20 @@ import xbmcaddon
 import xbmcgui
 import xbmcplugin
 
+from config import *
+
 notify = xbmcgui.Dialog()
 addon = xbmcaddon.Addon()
 
 HANDLE = int(sys.argv[1])
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..\\cache")
 
 def log(msg, level=xbmc.LOGDEBUG):
     if addon.getSetting('debug') == 'true' or level != xbmc.LOGDEBUG:
         xbmc.log('[%s] %s' % (addon.getAddonInfo('id'), msg), level=level)
 
 def initialize():
-    xbmc.executebuiltin("Container.SetViewMode(504)")
-
     log('steam-id = ' + addon.getSetting('steam-id'))
     log('steam-key = ' + addon.getSetting('steam-key'))
     log('steam-exe = ' + addon.getSetting('steam-exe'))
@@ -66,12 +68,24 @@ def initialize():
         return
 
 def add_menu_item(name, appid, set_context_menu=False):
-    image_path = 'http://cdn.akamai.steamstatic.com/steam/apps/' + str(appid) + '/header.jpg'
+    image_file_path = os.path.join(CACHE_DIR, str(appid) + '.jpg')
+    image_url = 'http://cdn.akamai.steamstatic.com/steam/apps/' + str(appid) + '/header.jpg'
+    if os.path.exists(image_file_path):
+        image_path = image_file_path
+    else:
+        image_path = image_url
+
     item  = xbmcgui.ListItem(name, iconImage=image_path, thumbnailImage=image_path)
     item.addContextMenuItems([('Play', 'RunPlugin(plugin://plugin.program.steam.library/run/' + str(appid) + ')'), ('Install', 'RunPlugin(plugin://plugin.program.steam.library/install/' + str(appid) + ')')])
-    item.setArt({ 'thumb': 'http://cdn.akamai.steamstatic.com/steam/apps/' + str(appid) + '/header.jpg', 'fanart': 'http://cdn.akamai.steamstatic.com/steam/apps/' + str(appid) + '/page_bg_generated_v6b.jpg' })
+    item.setArt({ 'thumb': image_path})
 
     if set_context_menu:
-        item.addContextMenuItems([('Play', 'RunPlugin(plugin://plugin.program.steam.library/run/' + str(appid) + ')'), ('Install', 'RunPlugin(plugin://plugin.program.steam.library/install/' + str(appid) + ')')])
+        menu_items = [('Play', 'RunPlugin(plugin://plugin.program.steam.library/run/' + str(appid) + ')'),
+                      ('Install', 'RunPlugin(plugin://plugin.program.steam.library/install/' + str(appid) + ')')]
+
+        for view in VIEW_LIST:
+            menu_items.append(('Mark ' + view, 'RunPlugin(plugin://plugin.program.steam.library/mark_for_view/' + str(appid) + '/' + view + ')'))
+
+        item.addContextMenuItems(menu_items)
 
     return item

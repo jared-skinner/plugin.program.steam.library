@@ -3,8 +3,11 @@ import subprocess
 import shlex
 import sqlite3
 import time
+import threading
+import urllib
 
 from utility import *
+from config import *
 import registry
 
 def dict_factory(cursor, row):
@@ -13,63 +16,29 @@ def dict_factory(cursor, row):
         d[col[0]] = row[idx]
     return d
 
-class SteamGame():
-    def __init__(self, name, app_id, recent_games):
-        self.name          = name
-        self.app_id        = app_id
-        self.is_installed  = False
-        self.is_recent     = False
-
-        # it's kinda dumb to have to pass this in, but I couldn't think of a
-        # better way to make a single call to the steam api for recent games
-        # without doing something dumber...
-        self.recent_games = recent_games
-
-        self.registry_vals = []
-
-        self.refresh_registry_vals()
-        self.is_game_installed()
-        self.is_game_recent()
-
-    def is_game_installed(self):
-        # filter out any applications not listed as installed
-        if str(self.app_id) in self.registry_vals:
-            self.is_installed = True
-
-    def is_game_recent(self):
-        for game in self.recent_games:
-            if game['appid'] == self.app_id:
-                self.is_recent = True
-
-    def refresh_registry_vals(self):
-        self.registry_vals = registry.get_registry_values(os.path.join(addon.getSetting('steam-path'), 'registry.vdf'))
-
-    def update_game_data(self):
-        self.is_game_installed()
-        self.is_game_recent()
-        self.refresh_registry_vals()
-
-
 class Steam():
     def __init__(self):
-        self.games = []
-        self.sql_conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..\cache\game_cache.db"))
+        self.all_games    = None
+        self.recent_games = None
+
+        self.registry_vals = None
+
+        self.sql_conn = sqlite3.connect(os.path.join(CACHE_DIR, "game_cache.db"))
         self.sql_conn.row_factory = dict_factory
         self.sql = self.sql_conn.cursor()
 
         self.sql.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='games';")
-        row = self.sql.fetchone()
-        if row is None:
-            self.get_games()
-            self.rebuild_games_cache()
+        number_of_rows = self.sql.fetchone()
+        if number_of_rows['count(*)'] == 0:
+            self.update_cache()
 
-    def get_games(self):
-        self.games = []
+    def get_games_from_steam_api(self):
         try:
             # query the steam web api for a full list of steam
             # applications/games that belong to the user
-            owned_games = requests.get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=' + addon.getSetting('steam-key') + '&steamid=' + addon.getSetting('steam-id') + '&include_appinfo=1&format=json', timeout=10)
-            owned_games.raise_for_status()
+            all_games = requests.get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key=' + addon.getSetting('steam-key') + '&steamid=' + addon.getSetting('steam-id') + '&include_appinfo=1&format=json', timeout=10)
+            all_games.raise_for_status()
+            self.all_games = all_games.json()['response']['games']
 
             # sleep so the api has time between requests.  It denies requests
             # if they are too close together
@@ -77,55 +46,64 @@ class Steam():
 
             recent_games = requests.get('https://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/?key=' + addon.getSetting('steam-key') + '&steamid=' + addon.getSetting('steam-id') + '&include_appinfo=1&format=json', timeout=10)
             recent_games.raise_for_status()
-            recent_games = recent_games.json()['response']['games']
-
-
-            for game in owned_games.json()['response']['games']:
-                self.games.append(SteamGame(game["name"], game["appid"], recent_games))
-
+            self.recent_games = recent_games.json()['response']['games']
         except requests.exceptions.RequestException as e:
-            # something went wrong, can't scan the steam library
             notify.notification('Error', 'An unexpected error has occurred while contacting Steam. Please ensure your Steam credentials are correct and then try again. If this problem persists please contact support.', xbmcgui.NOTIFICATION_ERROR)
             log(str(e), xbmc.LOGERROR)
             return
 
-    def build_games_cache(self):
+    def cache_game_thumbs(self, appids):
+        # add image to cache
+        for appid in appids:
+            if not os.path.isfile(os.path.join(CACHE_DIR, str(appid) + '.jpg')):
+                urllib.urlretrieve('http://cdn.akamai.steamstatic.com/steam/apps/' + str(appid) + '/header.jpg', os.path.join(CACHE_DIR, str(appid) + '.jpg'))
+
+    def update_cache(self):
+        self.get_games_from_steam_api()
+        self.refresh_registry_vals()
         self.create_cache_table()
-        self.cache_games()
 
-    def rebuild_games_cache(self):
-        self.drop_cache_table()
-        self.create_cache_table()
-        self.cache_games()
+        appids = []
+        for game in self.all_games:
+            is_recent = self.is_game_recent(game)
+            is_installed = self.is_game_installed(game)
+            self.sql.execute("INSERT OR IGNORE INTO games (appid, name, is_installed, is_recent VALUES (?,?,?,?);", (game['appid'], game['name'], is_installed, is_recent))
+            appids.append(game["appid"]) 
 
-    def drop_cache_table(self):
-        self.sql.execute('DROP TABLE IF EXISTS games')
-
-    def create_cache_table(self):
-        self.sql.execute('CREATE TABLE IF NOT EXISTS games (app_id NUMERIC PRIMARY KEY, name TEXT, is_installed NUMERIC, is_recent NUMERIC)')
-
-    def cache_games(self):
-        '''
-        Store game data in a sqlite database for quick retrival
-        '''
-        game_data = []
-        for game in self.games:
-            #log(game.name, xbmc.LOGERROR)
-            game_data.append((game.name, game.app_id, game.is_installed, game.is_recent))
-
-            if game.is_installed:
-                is_installed = "1" 
-            else:
-                is_installed = "0"
-
-            if game.is_recent:
-                is_recent = "1" 
-            else:
-                is_recent = "0"
-
-            self.sql.execute("INSERT INTO games (app_id, name, is_installed, is_recent) VALUES (?,?,?,?);", (game.app_id, game.name, is_installed, is_recent))
+        t = threading.Thread(target=self.cache_game_thumbs, args=(appids,))
+        t.start()
 
         self.sql_conn.commit()
+
+        # ensure we own all games in sql database
+        # TODO: we should be able to do this in a single query
+        for appid in appids:
+            self.sql.execute("SELECT count(*) FROM games WHERE appid=?;", (appid,))
+            number_of_rows = self.sql.fetchone()
+            if number_of_rows['count(*)'] == 0:
+                self.sql.execute("DELETE FROM games where appid=?;", (appid,))
+
+    def refresh_registry_vals(self):
+        self.registry_vals = registry.get_registry_values(os.path.join(addon.getSetting('steam-path'), 'registry.vdf'))
+
+    def is_game_installed(self, game):
+        # filter out any applications not listed as installed
+        if str(game['appid']) in self.registry_vals:
+            return True
+        return False
+
+    def is_game_recent(self, game):
+        for recent_game in self.recent_games:
+            if recent_game['appid'] == game['appid']:
+                return True
+        return False
+
+    def create_cache_table(self):
+        query = 'CREATE TABLE IF NOT EXISTS games (appid NUMERIC PRIMARY KEY, name TEXT, is_installed NUMERIC, is_recent NUMERIC'
+        for view in VIEW_LIST:
+            query += ', ' + view.lower().replace(" ", "_") + ' NUMERIC DEFAULT 0'
+        query += ")"
+        self.sql.execute(query)
 
     def get_all_games(self):
         self.sql.execute("SELECT * FROM games")
@@ -139,15 +117,20 @@ class Steam():
         self.sql.execute("SELECT * FROM games WHERE is_recent = 1")
         return self.sql.fetchall()
 
+    def get_view(self, view_name):
+        log(view_name, xbmc.LOGERROR)
+        self.sql.execute("SELECT * FROM games WHERE "+view_name+"=1")
+        return self.sql.fetchall()
+
+    def mark_game_for_view(self, appid, view):
+        self.sql.execute("UPDATE games SET "+view+"=1 WHERE appid=?;", (appid,))
+        self.sql_conn.commit()
+
     def install_game(self, id):
         log('executing ' + addon.getSetting('steam-exe') + ' steam://install/' + id)
-
-        # https://developer.valvesoftware.com/wiki/Steam_browser_protocol
         subprocess.call([addon.getSetting('steam-exe'), 'steam://install/' + id])
 
     def run_game(self, id):
         userArgs = shlex.split(addon.getSetting('steam-args'))
         log('executing ' + addon.getSetting('steam-exe') + ' ' + addon.getSetting('steam-args') + ' steam://rungameid/' + id)
-
-        # https://developer.valvesoftware.com/wiki/Steam_browser_protocol
         subprocess.call([addon.getSetting('steam-exe')] + userArgs + ['steam://rungameid/' + id])
