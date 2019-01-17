@@ -67,7 +67,7 @@ class Steam():
         for game in self.all_games:
             is_recent = self.is_game_recent(game)
             is_installed = self.is_game_installed(game)
-            self.sql.execute("INSERT OR IGNORE INTO games (appid, name, is_installed, is_recent VALUES (?,?,?,?);", (game['appid'], game['name'], is_installed, is_recent))
+            self.sql.execute("INSERT OR IGNORE INTO games (appid, name, is_installed, is_recent) VALUES (?,?,?,?);", (game['appid'], game['name'], is_installed, is_recent))
             appids.append(game["appid"]) 
 
         t = threading.Thread(target=self.cache_game_thumbs, args=(appids,))
